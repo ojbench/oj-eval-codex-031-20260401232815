@@ -6,7 +6,6 @@
 #include <vector>
 #include <memory>
 #include <unordered_set>
-#include <variant>
 
 class pylist {
 private:
@@ -15,6 +14,8 @@ private:
     // For list values, we support owning and non-owning (weak) references to avoid self cycles
     std::shared_ptr<std::vector<pylist>> sp_list_; // owning reference when present
     std::weak_ptr<std::vector<pylist>> wp_list_;   // weak reference when aliasing self
+    // Track the container that owns this element (if this pylist lives inside a list)
+    std::weak_ptr<std::vector<pylist>> owner_;
 
     // Ensure list_ is allocated when needed
     void ensure_list_storage() {
@@ -83,6 +84,32 @@ public:
         return *this;
     }
 
+    // Copy assignment from pylist with self-cycle avoidance when assigning to an element
+    pylist &operator=(const pylist &rhs) {
+        if (this == &rhs) return *this;
+        if (rhs.is_list_) {
+            // Detect assigning parent list into its own element => use weak alias
+            auto parent = owner_.lock();
+            const void *parent_id = parent ? static_cast<const void*>(parent.get()) : nullptr;
+            const void *rhs_id = rhs.sp_list_ ? static_cast<const void*>(rhs.sp_list_.get())
+                                              : static_cast<const void*>(rhs.wp_list_.lock().get());
+            if (parent_id && rhs_id && parent_id == rhs_id) {
+                is_list_ = true;
+                int_val_ = 0;
+                sp_list_.reset();
+                // Point to parent as weak alias
+                wp_list_ = owner_;
+                return *this;
+            }
+        }
+        // Default: shallow copy (pass by reference)
+        is_list_ = rhs.is_list_;
+        int_val_ = rhs.int_val_;
+        sp_list_ = rhs.sp_list_;
+        wp_list_ = rhs.wp_list_;
+        return *this;
+    }
+
     // Append operations (O(1) amortized)
     void append(const pylist &x) {
         // Assume called on a list as per problem description
@@ -109,8 +136,14 @@ public:
             alias.wp_list_ = sp_list_ ? std::weak_ptr<std::vector<pylist>>(sp_list_)
                                       : wp_list_;
             vec().push_back(alias);
+            // set owner on the newly pushed element
+            vec().back().owner_ = sp_list_ ? std::weak_ptr<std::vector<pylist>>(sp_list_)
+                                           : wp_list_;
         } else {
             vec().push_back(x);
+            // set owner on the newly pushed element
+            vec().back().owner_ = sp_list_ ? std::weak_ptr<std::vector<pylist>>(sp_list_)
+                                           : wp_list_;
         }
     }
 
@@ -134,7 +167,11 @@ public:
     // Indexing (O(1))
     pylist &operator[](size_t i) {
         ensure_list_storage();
-        return vec()[i];
+        // Ensure the element knows its owning container
+        pylist &ref = vec()[i];
+        ref.owner_ = sp_list_ ? std::weak_ptr<std::vector<pylist>>(sp_list_)
+                               : wp_list_;
+        return ref;
     }
     const pylist &operator[](size_t i) const {
         return vec()[i];
